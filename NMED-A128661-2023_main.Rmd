@@ -1,0 +1,512 @@
+---
+title: "Teamwork, Targets, Technology, and Tight Control in Newly Diagnosed Type 1 Diabetes:"
+subtitle: "Equitable implementation of a precision digital health program for glucose management"
+author: "Stanford [4T Study](https://clinicaltrials.gov/ct2/show/NCT04336969 'View trial registration') Team"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:          
+  html_document:       
+    theme: united    
+    highlight: kate   
+    toc: true
+    toc_depth: 3
+    toc_float: 
+      collapsed: true     
+      smooth_scroll: true 
+    number_sections: true
+    code_folding: hide
+    df_print: paged
+    fig_align: center 
+    fig_caption: true
+---
+
+```{r setup, include = F}
+
+rm(list = ls())               
+knitr::opts_chunk$set(warning = F, message = F)
+opts <- options(knitr.kable.NA = "")  
+
+pacman::p_load(pacman, rio, xlsx, redcapAPI, data.table, 
+               tidyverse, magrittr, forestplot,          
+               RColorBrewer, paletteer, ggpubr, gtsummary, kableExtra,          
+               nlme, rsample, mice)
+
+```
+
+```{r load.dat}
+
+cutdate = "2023-05-01"
+cutdate.CGM = "2023-03-09"
+
+source("NMED-A128661-2023_fns.R") 
+source("NMED-A128661-2023_dat.R")  
+
+IDs.p4T <- dat_base.all %>% filter(cohort == "p.4T") %>% pull(record_id) %>% 
+  substr(6, 8) %>% as.numeric()
+IDs.4T1 <- dat_base.all %>% filter(cohort == "4T.1") %>% pull(record_id) %>% 
+  substr(6, 8) %>% as.numeric()
+
+```
+
+# Preamble
+
+This R Markdown document was built with R version `r getRversion()` for the purposes of 
+
+* Describing demographic and clinical characteristics of the Historical (2014-2016), Pilot 4T (2018-2020), and 4T Study 1 (2020-2022) pediatric type 1 diabetes (T1D) cohorts.
+* Characterizing trajectories of HbA1c (%) and continuous glucose monitoring (CGM)-based metrics over the course of 12 months since T1D onset in each cohort.
+* Comparing change in HbA1c (%) from 4 to 12 months across cohorts in a mixed-effects regression framework.
+
+Results are generated using the **`r cutdate`** cut for REDCap data (Historical, Pilot 4T, and 4T Study 1) exports and the **`r cutdate.CGM`** cut for Dexcom CGM data exports. 
+
+For more details on using R Markdown, please refer to <http://rmarkdown.rstudio.com>.
+
+# Patient characteristics
+```{r tab1}
+
+vars_tab1 <- c("age.at.onset", "cgm_sex", "Race.Ethnicity", "cgm_dka_onset", 
+               "cgm_hba1c_onset", "cgm_insurance_type", "cgm_language",
+               "CGM.initiated", "CGM30days", "daystoCGM", "PercWearTime.CGM",
+               "pump_yesno", "Pump.PLGS", "Pump.OpenLoop", "Pump.HCL", 
+               "daystoPump", "cohort") 
+  
+tab1 <- dat_base.all %>% 
+    mutate(cohort = factor(cohort), 
+           Pump.HCL = Pump.HybridCL | Pump.AdvHybridCL) %>% 
+    select(all_of(vars_tab1)) %>%
+    tbl_summary(by = cohort,
+    missing = "ifany", missing_text = "Not entered",  
+    statistic = list(cgm_hba1c_onset ~ "{mean} ({sd})",
+                     all_categorical() ~ "{n} ({p})"), 
+    digits = list(age.at.onset ~ 0, c(cgm_hba1c_onset, PercWearTime.CGM) ~ 1,
+                  all_categorical() ~ c(0, 1)), 
+    label = list(age.at.onset ~ "Age (years) at T1D diagnosis, median (Q1, Q3)",
+                 cgm_sex ~ "Sex, n (%)",
+                 Race.Ethnicity ~ "Race/ethnicity, n (%)",  
+                 cgm_dka_onset ~ "DKA at diagnosis, n (%)",
+                 cgm_hba1c_onset ~ "HbA1c (%) at diagnosis, mean (SD)",
+                 cgm_insurance_type ~ "Insurance type, n (%)", 
+                 cgm_language ~ "Primary language, n (%)", 
+                 CGM.initiated ~ "CGM initiation within 1 year, n (%)",
+                 CGM30days ~ "Initiated CGM <= 30 days, n (%)",
+                 daystoCGM ~ "Days to CGM initiation, median (Q1, Q3)",
+                 PercWearTime.CGM ~ "CGM wear time (%), median (Q1, Q3)",
+                 pump_yesno ~ "Insulin pump use within 1 year, n (%)",
+                 Pump.PLGS ~ "Predictive Low-Glucose Suspend",
+                 Pump.OpenLoop ~ "Open loop",
+                 Pump.HCL ~ "Hybrid closed loop", 
+                 daystoPump ~ "Days to pump initiation, median (Q1, Q3)")) %>%
+  bold_labels() %>%   
+  modify_spanning_header(all_stat_cols() ~ "**Study Cohort**") %>%
+  modify_column_indent(
+    columns = label, 
+    rows = variable %in% c("Pump.PLGS", "Pump.OpenLoop", "Pump.HCL")
+  )
+
+
+tab1
+
+```
+
+## Study 1 characteristics by Month 12 HbA1c availability
+```{r tab.a1c}
+
+vars_tab1.4T1 <- c("age.at.onset", "cgm_sex", "Race.Ethnicity",     
+                   "cgm_dka_onset", "cgm_hba1c_onset", "cgm_insurance_type", 
+                   "cgm_language", "GMI") 
+
+tab1.4T1 <- dat_base.all %>% filter(cohort == "4T.1") %>%
+  left_join((dat_cgm.4T1 %>% filter(Week.of.Visit %in% 52 & !is.na(GMI)) %>%
+             mutate(record_id = paste0("4T.1-", sprintf("%03d", Record.ID))) %>%
+             select(record_id, GMI)), by = "record_id") %>%
+  mutate(a1c_mon12 = ifelse(record_id %in% dat_long.all$record_id[dat_long.all$month %in% 12], "Yes", "No"),
+         Race.Ethnicity = factor(replace(Race.Ethnicity, Race.Ethnicity %in% "Unknown / Declined to state", NA))) %>% 
+  select(a1c_mon12, all_of(vars_tab1.4T1)) %>%
+  tbl_summary(by = a1c_mon12,
+  missing = "ifany", missing_text = "Not entered",  
+  statistic = list(c(cgm_hba1c_onset, GMI) ~ "{mean} ({sd})",
+                   all_categorical() ~ "{n} ({p})"), 
+  digits = list(age.at.onset ~ 0, c(cgm_hba1c_onset, GMI) ~ 1,
+                all_categorical() ~ c(0, 1)), 
+  label = list(age.at.onset ~ "Age (years) at T1D diagnosis, median (Q1, Q3)",
+               cgm_sex ~ "Sex, n (%)",
+               Race.Ethnicity ~ "Race/ethnicity, n (%)",  
+               cgm_dka_onset ~ "DKA at diagnosis, n (%)",
+               cgm_hba1c_onset ~ "HbA1c (%) at diagnosis, mean (SD)",
+               cgm_insurance_type ~ "Insurance type, n (%)", 
+               cgm_language ~ "Primary language, n (%)",
+               GMI ~ "GMI at 12 months, mean (SD)")
+  ) %>%
+  add_overall() %>%
+  bold_labels() %>%   
+  add_difference(everything() ~ "smd") %>%  
+  modify_spanning_header(c(stat_1, stat_2) ~ "**Month 12 HbA1c Availability**")
+
+tab1.4T1
+
+```
+
+# HbA1c trajectories
+```{r fig.loess, fig.height = 7, fig.width = 9}
+
+dat.12mon <- dat_long.all %>% filter(studyday <= 12*30)
+span.mse <- get_optimal_span(x = dat.12mon$studymon, y = dat.12mon$cgm_hba1c) 
+
+plot_loess(cohorts = c("hist", "p.4T", "4T.1"), 
+           titleText = "1-year HbA1c by cohort",
+           col.hist = "#A73030", col.p4T = "#E18727", col.4T1 = "#0072B5",
+           spanVal = span.mse,
+           a1c.target = 7)
+
+```
+
+```{r tab.loess.means}
+
+mean.tab <- get_loess_means(dat = dat.12mon, timepts = c(0.1, seq(3, 12, 3)), 
+                            spanVal = span.mse, means = T) %>% round(2)
+
+rownames(mean.tab) <- paste0("Month ", seq(0, 12, 3))
+colnames(mean.tab) <- c("Historical", "Pilot 4T",  "4T Study 1")
+
+kbl(t(mean.tab)[,-1], caption = "LOESS-based HbA1c (%) during follow-up", align = "r") %>%
+  kable_paper(bootstrap_options = "hover", full_width = F, position = "left")
+
+```
+
+```{r tab.loess.diff}
+
+diff.tab <- get_loess_means(dat = dat.12mon, timepts = c(0.1, seq(3, 12, 3)), spanVal = span.mse)
+rownames(diff.tab) <- paste0("Month ", c(0.1, seq(3, 12, 3)))
+colnames(diff.tab) <- c("4T Study 1 minus Historical", "4T Study 1 minus Pilot 4T")
+
+n.iter = 1000
+diff.tab.ci <- bootstrap_ci(dat.in = dat.12mon, timepts = seq(6, 12, 3), 
+                             n.times = n.iter, seed = 2023)
+
+diff.tab.out <- combine_output(tab.mean = round(diff.tab[paste0("Month ", c(6, 9, 12)),], 2), 
+                               tab.ci = t(diff.tab.ci)) 
+
+kbl(diff.tab.out, caption = paste0("LOESS-based HbA1c percentage point differences with bootstrapped CIs (", 
+format(n.iter, big.mark = ","), " iterations)"),
+    col.names = c("4T Study 1 \u2212 Historical", "4T Study 1 \u2212 Pilot 4T")) %>%
+    kable_paper(bootstrap_options = "hover", full_width = F, position = "left")
+
+```
+
+# CGM metrics
+
+## Glucose management indicator (GMI)
+```{r fig.gmi, fig.height = 5.5, fig.width = 7}
+
+plot_loess_ci(xvar = dat_cgm.4T1$Week.of.Visit[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              yvar = dat_cgm.4T1$GMI[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              spanval = 0.5, addRef = 7, maintxt = "Glucose Management Indicator", 
+              ylabtxt = "GMI (%)", yrange = c(5, 11), leg.pos = "topright",
+              yseq = seq(4, 11, 1),
+              addPilot = T, 
+                xvar.p4T = dat_cgm.p4T$Week.of.Visit[dat_cgm.p4T$Week.of.Visit > 0],
+                yvar.p4T = dat_cgm.p4T$GMI[dat_cgm.p4T$Week.of.Visit > 0])
+
+```
+
+## Average CGM glucose
+```{r fig.glu, fig.height = 5.5, fig.width = 7}
+
+plot_loess_ci(xvar = dat_cgm.4T1$Week.of.Visit[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              yvar = dat_cgm.4T1$glucose.mgdL[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              spanval = 0.5, addRef = 180, maintxt = "Average CGM glucose", 
+              ylabtxt = "Average glucose (mg/dL)", yrange = c(50, 325), leg.pos = "topright",
+              yseq = seq(50, 325, 25),
+              addPilot = T, 
+                xvar.p4T = dat_cgm.p4T$Week.of.Visit[dat_cgm.p4T$Week.of.Visit > 0],
+                yvar.p4T = dat_cgm.p4T$glucose.mgdL[dat_cgm.p4T$Week.of.Visit > 0])
+
+```
+
+## Time in range (TIR)
+```{r fig.tir, fig.height = 5.5, fig.width = 7}
+
+plot_loess_ci(xvar = dat_cgm.4T1$Week.of.Visit[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              yvar = 100*dat_cgm.4T1$TIR[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              spanval = 0.5, addRef = 70, maintxt = "Time in Range",  
+              ylabtxt = "Time in 70-180 mg/dL (%)", yrange = c(0, 100),  
+              yseq = seq(0, 100, 10),
+              addPilot = T, 
+                xvar.p4T = dat_cgm.p4T$Week.of.Visit[dat_cgm.p4T$Week.of.Visit > 0],
+                yvar.p4T = 100*dat_cgm.p4T$TIR[dat_cgm.p4T$Week.of.Visit > 0])
+
+```
+
+## Time in tighter range (TITR) 
+```{r fig.titr, fig.height = 5.5, fig.width = 7}
+
+plot_loess_ci(xvar = dat_cgm.4T1$Week.of.Visit[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              yvar = 100*dat_cgm.4T1$TITR[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              spanval = 0.5, addRef = 50, maintxt = "Time in Tighter Range", 
+              ylabtxt = "Time in 70-140 mg/dL (%)", yrange = c(0, 100), 
+              yseq = seq(0, 100, 10),
+              addPilot = T, 
+                xvar.p4T = dat_cgm.p4T$Week.of.Visit[dat_cgm.p4T$Week.of.Visit > 0],
+                yvar.p4T = 100*dat_cgm.p4T$TITR[dat_cgm.p4T$Week.of.Visit > 0])
+
+```
+
+## Time below range (TBR)
+```{r fig.tbr, fig.height = 5.5, fig.width = 7}
+
+plot_loess_ci(xvar = dat_cgm.4T1$Week.of.Visit[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              yvar = 100*dat_cgm.4T1$hypo[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              spanval = 0.5, addRef = NULL, 
+              maintxt = "Hypoglycemia \n< 70 mg/dL", 
+              ylabtxt = "Time in 54-69 mg/dL (%)", yrange = c(0, 4),
+              yseq = seq(0, 4, 0.5),
+              addPilot = T, 
+                xvar.p4T = dat_cgm.p4T$Week.of.Visit[dat_cgm.p4T$Week.of.Visit > 0],
+                yvar.p4T = 100*dat_cgm.p4T$hypo[dat_cgm.p4T$Week.of.Visit > 0],
+              leg.pos = "topright")
+
+```
+
+## Time in clinically significant hypoglycemia
+```{r fig.csh, fig.height = 5.5, fig.width = 7}
+
+plot_loess_ci(xvar = dat_cgm.4T1$Week.of.Visit[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              yvar = 100*dat_cgm.4T1$hypo.severe[dat_cgm.4T1$Record.ID %in% IDs.4T1], 
+              spanval = 0.5, addRef = 5, maintxt = "Clinically Significant Hypoglycemia \n< 54 mg/dL",  
+              ylabtxt = "Time <54 mg/dL (%)", yrange = c(0, 3),
+              yseq = seq(0, 3, 0.5),
+              addPilot = T, 
+                xvar.p4T = dat_cgm.p4T$Week.of.Visit[dat_cgm.p4T$Week.of.Visit > 0],
+                yvar.p4T = 100*dat_cgm.p4T$hypo.severe[dat_cgm.p4T$Week.of.Visit > 0],
+              leg.pos = "topright")
+
+```
+
+## AGP thermometers
+```{r fig.agp, fig.height = 11, fig.width = 9}
+
+SG.n.p4T <- dat_tir.p4T[[1]]
+SG.p.p4T <- dat_tir.p4T[[2]]  
+
+SG.n.4T1 <- dat_tir.4T1[[1]]
+SG.p.4T1 <- dat_tir.4T1[[2]]
+
+par(mfrow = c(2, 1))
+plot_agp(ID.list = IDs.p4T, SG.n = SG.n.p4T[-1], SG.perc = SG.p.p4T[,-1], 
+         mainText = "Pilot 4T")
+plot_agp(ID.list = IDs.4T1, SG.n = SG.n.4T1[-1], SG.perc = SG.p.4T1[,-1], 
+         mainText = "4T Study 1")
+
+```
+
+# Achieving ADA-recommended targets
+```{r fig.tar.setup}
+
+wks <- c(4, 12, 26, 40, 52)
+
+tab.tar.gmi <- dat_cgm.p4T %>% 
+  filter(Week.of.Visit %in% wks & !is.na(GMI)) %>% 
+  select(Record.ID, Week.of.Visit, GMI) %>% 
+  mutate(cohort = "p.4T") %>%
+  
+  rbind((dat_cgm.4T1 %>% 
+  filter(Week.of.Visit %in% wks & !is.na(GMI)) %>% 
+  select(Record.ID, Week.of.Visit, GMI) %>%
+    mutate(cohort = "4T.1"))) %>%
+  
+  mutate(cohort = factor(cohort, levels = c("p.4T", "4T.1")),
+         target.lt7 = ifelse(GMI < 7, 1, 0),
+         target.lt7.5 = ifelse(GMI < 7.5, 1, 0)) %>%
+  
+  group_by(cohort, Week.of.Visit) %>%
+  summarise(totn = length(target.lt7),
+            achieved.target.lt7.5 = round(100*mean(target.lt7.5, na.rm = T), 1),
+            achieved.target.lt7 = round(100*mean(target.lt7, na.rm = T), 1)) %>%
+  mutate(month = as.factor(c(1, 3, 6, 9, 12)))
+
+totn <- rbind(dat_cgm.p4T %>% mutate(cohort = "p.4T"),
+              dat_cgm.4T1 %>% mutate(cohort = "4T.1")) %>%
+              mutate(cohort = factor(cohort, levels = c("p.4T", "4T.1"))) %>%
+                filter(Week.of.Visit %in% wks) %>% count(Week.of.Visit, cohort) %>%
+  mutate(month = factor(rep(c(1, 3, 6, 9, 12), rep(2, 5))))
+
+tab.a1c.7 <- dat_long.all %>% filter(!is.na(month) & !is.na(cgm_hba1c) & 
+                                     cohort %in% c("p.4T", "4T.1")) %>%
+  select(record_id, month, target.lt7) %>%
+  arrange(record_id, desc(target.lt7)) %>%
+  distinct(record_id, month, .keep_all = T)
+
+tab.a1c.7.5 <- dat_long.all %>% filter(!is.na(month) & !is.na(cgm_hba1c) & 
+                                       cohort %in% c("p.4T", "4T.1")) %>%
+  select(record_id, month, target.lt7.5) %>%
+  arrange(record_id, desc(target.lt7.5)) %>%
+  distinct(record_id, month, .keep_all = T)
+
+tab.a1c <- merge(tab.a1c.7, tab.a1c.7.5, by = c("record_id", "month"))
+
+tab.gmi <- dat_cgm.p4T %>% 
+  filter(Week.of.Visit %in% wks & !is.na(GMI)) %>% 
+  select(Record.ID, Week.of.Visit, GMI) %>% 
+  mutate(cohort = "Pilot 4T",
+         record_id = paste0("p.4T-", sprintf("%03d", Record.ID))) %>%
+  
+  rbind((dat_cgm.4T1 %>% 
+           filter(Week.of.Visit %in% wks & !is.na(GMI)) %>% 
+           select(Record.ID, Week.of.Visit, GMI) %>%
+           mutate(cohort = "4T Study 1",
+                  record_id = paste0("4T.1-", sprintf("%03d", Record.ID))))) %>%
+  
+  mutate(cohort = factor(cohort, levels = c("Pilot 4T", "4T Study 1")),
+         target.lt7 = ifelse(GMI < 7, 1, 0),
+         target.lt7.5 = ifelse(GMI < 7.5, 1, 0),
+         month = case_match(Week.of.Visit, 4 ~ 1,  12 ~ 3, 26 ~ 6, 40 ~ 9, 52 ~ 12)) %>%
+  select(record_id, month, target.lt7, target.lt7.5) %>%
+  rename(gmi.target.lt7 = target.lt7,
+         gmi.target.lt7.5 = target.lt7.5)
+
+tab.tar.all <- merge(tab.a1c, tab.gmi, by = c("record_id", "month"), all = T) %>%  
+  mutate(cohort = factor(substr(record_id, 1, 4), levels = c("p.4T", "4T.1")),
+         fin.target.lt7 = ifelse(is.na(target.lt7), gmi.target.lt7, target.lt7),
+         fin.target.lt7.5 = ifelse(is.na(target.lt7.5), gmi.target.lt7.5, target.lt7.5)) %>%
+  group_by(cohort, month) %>%
+  summarise(totn = length(target.lt7),
+            achieved.target.lt7.5 = round(100*mean(fin.target.lt7.5, na.rm = T), 1),
+            achieved.target.lt7 = round(100*mean(fin.target.lt7, na.rm = T), 1)) %>%
+  mutate(month = as.factor(month))
+
+```
+
+```{r fig.tar, fig.height = 9, fig.width = 12}
+
+par(mfrow = c(2, 2))
+
+create_barplot(dat = subset(dat_long.all, !is.na(month) & cohort != "4T.2"), 
+               thres = "target.lt7.5", titletxt = "Proportion Achieving HbA1c < 7.5% Target")
+
+create_barplot.gmi(dat = tab.tar.all, thres = "achieved.target.lt7.5", 
+                   titletxt = "Proportion Achieving HbA1c < 7.5% Target \n(Supplemented with GMI)")
+
+create_barplot(dat = subset(dat_long.all, !is.na(month) & cohort != "4T.2"), 
+               thres = "target.lt7", titletxt = "Proportion Achieving HbA1c < 7% Target")
+
+create_barplot.gmi(dat = tab.tar.all, thres = "achieved.target.lt7", 
+                   titletxt = "Proportion Achieving HbA1c < 7% Target \n(Supplemented with GMI)")
+
+```
+
+# Regression analysis
+
+* Main analysis: full 12-month follow-up
+* Sensitivity #1: follow-up censored at advanced hybrid closed loop pump initiation
+* Sensitivity #2: restrict to patients ever on open loop pump
+
+```{r fit.mod}
+
+out.models <- fit_models(dat.mod = dat_long.all %>% mutate(cohort = factor(cohort)), 
+                         n.months = 12, t0 = 4, groupBy = "cohort") 
+est.slope <- out.models[[1]]
+
+```
+
+```{r fig.fp, fig.height = 5, fig.width = 9}
+
+create_forestplot(tab.fit = est.slope, maxCI = 1.8, titletxt = "Adjusted", ref = 0)
+
+pvals.adj <- paste0("P=", sprintf("%.3f", est.slope[which(!is.na(est.slope[, 10])), 10]))
+pvals.adj <- ifelse(pvals.adj == "P=0.000", "P<0.001", pvals.adj)
+
+pos.x <- c(0.75, 0.7, 0.54, 0.49, 0.33, 0.28)
+for (i in 1:length(pvals.adj)){
+  grid.text(pvals.adj[i], unit(0.7, 'npc'), unit(pos.x[i], 'npc'), 
+            gp = gpar(fontsize = 11, font = 1))
+}
+
+```
+
+```{r tab.mi}
+
+n.imp = 10 
+seed = 2023
+
+load("NMED-A128661-2023_mi.Rdata") # NMED-A128661-2023_mi.R
+
+vars_mod <- c("record_id", 
+              "age.at.onset", "cgm_sex", "Hispanic", "cgm_dka_onset", 
+              "cgm_hba1c_onset", "Public", "cgm_language",
+              "studyday", "studymon", "cgm_hba1c", "cohort")
+
+mod <- as.formula("cgm_hba1c ~ group + studymon +                       
+                   I((studymon-time)*studymon.gt4) +
+                   group * I((studymon-time)*studymon.gt4) +
+                   age.at.onset + cgm_sex + Hispanic + Public")
+
+est.imp <- list()
+
+for (i in 1:n.imp){ 
+  
+  df_long <- gather(data = complete(mi, i),
+                    a1c_day1:a1c_day360, 
+                    key = 'studyday',           
+                    value = 'cgm_hba1c') %>%
+    mutate(studyday = as.numeric(substr(studyday, 8, nchar(studyday))),
+           studymon = studyday/30,
+           cohort = "4T.1")
+  
+    dat.mod <- dat_long.all %>% filter(cohort %in% c("hist", "p.4T")) %>%
+       select(all_of(vars_mod)) %>%
+       rbind(df_long[,vars_mod]) %>%
+       filter(studyday <= 12*30 & studyday > 0 & !is.na(cgm_hba1c))
+  
+    dat.mod$time <- 4
+    dat.mod$studymon.gt4 <- with(dat.mod, as.integer(studymon > time))
+    dat.mod$group <- factor(dat.mod$cohort, levels = c("4T.1", "hist", "p.4T"))
+  
+    fit.lmm <- nlme::lme(fixed = mod,
+                         random = reStruct( ~ 1 + studymon | record_id, pdClass = "pdSymm", REML = T),
+                         correlation = corCAR1(form = ~ 1 | record_id), data = dat.mod,
+                         method = "REML", na.action = na.exclude)
+    
+    est.imp[[i]] <- get_slopes(fit = fit.lmm, groupBy = "cohort")
+
+}
+
+beta <- var.beta <- matrix(NA, 3, n.imp)
+for (i in 1:length(est.imp)){
+  beta[,i] <- est.imp[[i]][,"Beta"]
+  var.beta[,i] <- ((est.imp[[i]][,"CI.U"] - est.imp[[i]][,"Beta"])/1.96)^2
+}
+
+beta.m <- apply(beta, 1, mean) 
+
+se.beta <- rowSums(cbind(apply(var.beta, 1, mean), 
+                         apply(beta, 1, var))) %>% sqrt()
+
+tab.imp <- cbind(round(beta.m, 2), 
+                 paste0("(", round(beta.m - 1.96*se.beta, 2), ", ",
+                             round(beta.m + 1.96*se.beta, 2), ")"))
+rownames(tab.imp) <- c("Historical", "Pilot 4T", "4T Study 1")
+colnames(tab.imp) <- c("Slope", "95% CI")
+
+kbl(tab.imp, caption = "Estimated 4 to 12-month change in HbA1c (%) under multiple imputation (10 iterations)", 
+    align = "r") %>%
+  kable_paper(bootstrap_options = "hover", full_width = F, position = "left")        
+
+```
+
+```{r tab.1y}
+
+get_1yr_metrics(cohort = "p.4T", week = 52)
+get_1yr_metrics(cohort = "4T.1", week = 52)
+
+dat_cgm.p4T %>% 
+  filter(Week.of.Visit %in% 52 & !is.na(GMI)) %>% 
+  select(Record.ID, Week.of.Visit, GMI) %>% 
+  mutate(cohort = "p.4T") %>%
+  
+  rbind((dat_cgm.4T1 %>% 
+           filter(Week.of.Visit %in% 52 & !is.na(GMI)) %>% 
+           select(Record.ID, Week.of.Visit, GMI) %>%
+           mutate(cohort = "4T.1"))) %>%
+  mutate(cohort = factor(cohort, levels = c("p.4T", "4T.1"))) %>%
+  group_by(cohort) %>%
+  summarise(avg.GMI = mean(GMI, na.rm = T)) 
+
+```
